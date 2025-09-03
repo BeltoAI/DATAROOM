@@ -3,7 +3,6 @@
 import { useMemo, useState } from "react";
 import Papa from "papaparse";
 import * as ss from "simple-statistics";
-import kmeans from "ml-kmeans";
 import dynamic from "next/dynamic";
 import ClientOnly from "./components/ClientOnly";
 
@@ -20,8 +19,55 @@ import {
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend, Title);
 
-// Load Scatter on client only
+// Client-only charts
 const Scatter = dynamic(() => import("react-chartjs-2").then(m => m.Scatter), { ssr: false });
+
+/* ---------- tiny, dependency-free k-means (Euclidean) ---------- */
+function kmeansSimple(points, k, { maxIters = 100, seed = 42 } = {}) {
+  if (points.length < k) return null;
+  // seeded pseudo-RNG for deterministic init
+  let s = seed >>> 0;
+  const rand = () => (s = (1664525 * s + 1013904223) >>> 0) / 2**32;
+
+  // init: pick k random distinct points
+  const centroids = [];
+  const used = new Set();
+  while (centroids.length < k) {
+    const idx = Math.floor(rand() * points.length);
+    if (!used.has(idx)) { used.add(idx); centroids.push(points[idx].slice()); }
+  }
+
+  let clusters = new Array(points.length).fill(0);
+  const dist2 = (a,b)=>a.reduce((acc,ai,i)=>acc+(ai-b[i])**2,0);
+
+  for (let iter=0; iter<maxIters; iter++) {
+    // assign
+    let changed = false;
+    for (let i=0;i<points.length;i++){
+      let best=-1, bd=Infinity;
+      for (let c=0;c<k;c++){
+        const d=dist2(points[i], centroids[c]);
+        if (d<bd){bd=d; best=c;}
+      }
+      if (clusters[i]!==best){clusters[i]=best; changed=true;}
+    }
+    // recompute
+    const sums = Array.from({length:k}, ()=>Array(points[0].length).fill(0));
+    const counts = new Array(k).fill(0);
+    for (let i=0;i<points.length;i++){
+      const cid = clusters[i];
+      counts[cid]++;
+      for (let d=0; d<points[i].length; d++) sums[cid][d]+=points[i][d];
+    }
+    for (let c=0;c<k;c++){
+      if (counts[c]===0) continue; // keep old centroid if empty
+      for (let d=0;d<sums[c].length;d++) centroids[c][d]=sums[c][d]/counts[c];
+    }
+    if (!changed) break;
+  }
+  return { clusters, centroids };
+}
+/* -------------------------------------------------------------- */
 
 function makeGrid(rows, cols) {
   const grid = [];
@@ -103,8 +149,13 @@ export default function Home() {
       if (ok) matrix.push(row);
     }
     if (matrix.length < k) return null;
-    try { return { cols, ...(kmeans(matrix, k, { seed: 42 })) }; }
-    catch { return null; }
+    try {
+      const out = kmeansSimple(matrix, k, { seed: 42, maxIters: 100 });
+      if (!out) return null;
+      return { cols, clusters: out.clusters, centroids: out.centroids };
+    } catch {
+      return null;
+    }
   }, [data, clusterCols, k, names.length]);
 
   const scatterData = useMemo(() => {
@@ -157,7 +208,6 @@ export default function Home() {
         if (!rows.length) return;
         const maxLen = Math.max(...rows.map(r => r.length));
         const grid = rows.map((r, i) => Array.from({ length: maxLen }, (_, j) => (r[j] ?? "").toString()));
-        // normalize headers
         grid[0] = grid[0].map(h => String(h || "").trim() || "col");
         setData(grid);
       }
@@ -220,19 +270,19 @@ Answer clearly and concisely. Provide specific next steps if needed.
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
-      <div className="container py-6">
+      <div className="max-w-7xl mx-auto px-4 py-6">
         <header className="mb-6 flex items-center justify-between">
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">DATAROOM — build datasets, analyze, ask</h1>
           <div className="flex gap-2">
-            <button onClick={newGrid} className="btn">new</button>
-            <button onClick={exportCSV} className="btn">export csv</button>
-            <button onClick={exportReport} className="btn">export report</button>
+            <button onClick={newGrid} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600">new</button>
+            <button onClick={exportCSV} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600">export csv</button>
+            <button onClick={exportReport} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600">export report</button>
           </div>
         </header>
 
         <section className="grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <div className="card">
+            <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4">
               <div className="flex flex-wrap items-center gap-2 mb-4">
                 <label className="px-3 py-2 rounded-xl bg-slate-800/80 cursor-pointer">
                   import csv
@@ -272,7 +322,7 @@ Answer clearly and concisely. Provide specific next steps if needed.
           </div>
 
           <div className="space-y-6">
-            <div className="card">
+            <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4">
               <h2 className="font-semibold mb-3">summary</h2>
               <div className="space-y-2 max-h-64 overflow-auto pr-1">
                 {summary.map((s, idx) => (
@@ -286,7 +336,7 @@ Answer clearly and concisely. Provide specific next steps if needed.
               </div>
             </div>
 
-            <div className="card">
+            <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4">
               <h2 className="font-semibold mb-3">ask the analysis</h2>
               <textarea className="w-full h-24 rounded-xl bg-slate-800/80 p-2 outline-none" placeholder="e.g., is Y increasing with X? which cluster is most spread?" value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} />
               <button onClick={askAI} disabled={busy || !aiQuestion.trim()} className="mt-2 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50">
@@ -298,7 +348,7 @@ Answer clearly and concisely. Provide specific next steps if needed.
         </section>
 
         <section className="mt-6 grid lg:grid-cols-2 gap-6">
-          <div className="card">
+          <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4">
             <h2 className="font-semibold mb-3">linear regression</h2>
             <div className="flex gap-2 mb-3">
               <select value={xCol} onChange={(e) => setXCol(Number(e.target.value))} className="px-2 py-1 rounded bg-slate-800/80">
@@ -315,14 +365,14 @@ Answer clearly and concisely. Provide specific next steps if needed.
                 </div>
                 <div className="bg-slate-800/40 rounded-xl p-2 h-64">
                   <ClientOnly>
-                    {scatterData && <Scatter data={scatterData} options={chartOptions} />}
+                    {scatterData && <Scatter data={scatterData} options={{ responsive: true, maintainAspectRatio: false, scales: { x: { type: "linear" }, y: { type: "linear" } } }} />}
                   </ClientOnly>
                 </div>
               </>
             ) : <div className="text-sm opacity-60">need at least 2 numeric rows for both columns</div>}
           </div>
 
-          <div className="card">
+          <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4">
             <h2 className="font-semibold mb-3">k-means clustering</h2>
             <div className="flex flex-wrap gap-2 mb-3">
               <div className="flex items-center gap-1">
@@ -348,7 +398,7 @@ Answer clearly and concisely. Provide specific next steps if needed.
             </div>
             <div className="bg-slate-800/40 rounded-xl p-2 h-64">
               <ClientOnly>
-                {clusterScatter && <Scatter data={clusterScatter} options={chartOptions} />}
+                {clusterScatter && <Scatter data={clusterScatter} options={{ responsive: true, maintainAspectRatio: false, scales: { x: { type: "linear" }, y: { type: "linear" } } }} />}
               </ClientOnly>
             </div>
           </div>
