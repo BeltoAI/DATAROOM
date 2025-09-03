@@ -33,7 +33,6 @@ function kmeansSimple(points, k, { maxIters = 100, seed = 42 } = {}) {
     for (let c=0;c<k;c++){ if(!cnt[c]) continue; for(let d=0;d<sums[c].length;d++) centroids[c][d]=sums[c][d]/cnt[c]; }
     if (!changed) break;
   }
-  // compute SSE/inertia
   const inertia = points.reduce((acc, p, i) => {
     const c = clusters[i]; const center = centroids[c];
     const sse = p.reduce((a, pv, d) => a + (pv - center[d])**2, 0);
@@ -73,7 +72,6 @@ const EXAMPLES = [
 ];
 
 export default function Home() {
-  // Full dataset lives in fullData; we render only first 10 rows in table
   const [fullData, setFullData] = useState(() => makeGrid(8,4));
   const [xCol, setXCol] = useState(0);
   const [yCol, setYCol] = useState(1);
@@ -83,18 +81,15 @@ export default function Home() {
   const [aiAnswer, setAiAnswer] = useState("");
   const [busyAsk, setBusyAsk] = useState(false);
 
-  // AI dataset generation UI state
   const [genPrompt, setGenPrompt] = useState(EXAMPLES[0]);
   const [genRows, setGenRows] = useState(1000);
   const [busyGen, setBusyGen] = useState(false);
   const [genError, setGenError] = useState("");
 
-  // VIEW: first 10 rows only (plus header)
-  const viewData = useMemo(() => {
-    const take = Math.min(fullData.length, 11); // header + 10 rows
-    return fullData.slice(0, take);
-  }, [fullData]);
+  const [corrTarget, setCorrTarget] = useState(0);        // correlation target column
+  const [clusterExplain, setClusterExplain] = useState(""); // LLM explanation
 
+  const viewData = useMemo(() => fullData.slice(0, Math.min(fullData.length, 11)), [fullData]);
   const names = columnNames(fullData);
   const totalRows = Math.max(fullData.length - 1, 0);
 
@@ -104,64 +99,86 @@ export default function Home() {
     return { name, count: vals.length, mean: ss.mean(vals), median: ss.median(vals), stdev: ss.standardDeviation(vals), min: ss.min(vals), max: ss.max(vals) };
   }), [fullData]);
 
-  // ---- Linear Regression (with idiot-safe outputs) ----
+  // Regression
   const regression = useMemo(() => {
-    const aligned = [];
-    const xs = [], ys = [];
+    const aligned = [], xs=[], ys=[];
     for (let i = 1; i < fullData.length; i++) {
-      const xv = Number(fullData[i][xCol]);
-      const yv = Number(fullData[i][yCol]);
+      const xv = Number(fullData[i][xCol]); const yv = Number(fullData[i][yCol]);
       if (Number.isFinite(xv) && Number.isFinite(yv)) { aligned.push([xv, yv]); xs.push(xv); ys.push(yv); }
     }
     if (aligned.length < 2) return null;
-    const lr = ss.linearRegression(aligned); // { m, b }
-    const line = ss.linearRegressionLine(lr);
-    const r2 = ss.rSquared(aligned, line);
-    const r = ss.sampleCorrelation(xs, ys); // Pearson r
+    const lr = ss.linearRegression(aligned); const line = ss.linearRegressionLine(lr);
+    const r2 = ss.rSquared(aligned, line); const r = ss.sampleCorrelation(xs, ys);
     return { slope: lr.m, intercept: lr.b, r, r2, line, points: aligned };
   }, [fullData, xCol, yCol]);
 
-  // ---- K-means ----
+  // Correlation vs chosen target (top 5)
+  const topCorr = useMemo(() => {
+    const targetVals = parseNumericColumn(fullData, corrTarget);
+    if (targetVals.length < 2) return [];
+    const out = [];
+    for (let j=0; j<names.length; j++){
+      if (j===corrTarget) continue;
+      const vals = parseNumericColumn(fullData, j);
+      const n = Math.min(targetVals.length, vals.length);
+      if (n < 2) continue;
+      // align by rows
+      const a=[], b=[];
+      for (let i=1; i<fullData.length; i++){
+        const v1 = Number(fullData[i][corrTarget]);
+        const v2 = Number(fullData[i][j]);
+        if (Number.isFinite(v1) && Number.isFinite(v2)) { a.push(v1); b.push(v2); }
+      }
+      if (a.length >= 2) {
+        try { out.push({ name: names[j], r: ss.sampleCorrelation(a,b) }); } catch {}
+      }
+    }
+    return out.sort((x,y)=>Math.abs(y.r)-Math.abs(x.r)).slice(0,5);
+  }, [fullData, corrTarget, names]);
+
+  // K-means
   const clusters = useMemo(() => {
     const cols = clusterCols.filter(c => c >= 0 && c < names.length);
     if (!cols.length || fullData.length <= 1) return null;
-    const matrix = [];
-    const rowIndexMap = []; // to map back for centroids table if needed
-    for (let i = 1; i < fullData.length; i++) {
-      const row = [];
-      let ok = true;
-      for (const c of cols) {
-        const v = Number(fullData[i][c]);
-        if (!Number.isFinite(v)) { ok = false; break; }
-        row.push(v);
-      }
-      if (ok) { matrix.push(row); rowIndexMap.push(i); }
+    const matrix = [], rowIndexMap=[];
+    for (let i=1;i<fullData.length;i++){
+      const row=[]; let ok=true;
+      for (const c of cols){ const v=Number(fullData[i][c]); if(!Number.isFinite(v)){ ok=false; break; } row.push(v); }
+      if (ok){ matrix.push(row); rowIndexMap.push(i); }
     }
     if (matrix.length < k) return null;
-    try {
-      const out = kmeansSimple(matrix, k, { seed: 42, maxIters: 100 });
+    try{
+      const out = kmeansSimple(matrix, k, { seed:42, maxIters:100 });
       if (!out) return null;
-      // cluster sizes
-      const sizes = new Array(k).fill(0);
-      out.clusters.forEach(cid => sizes[cid]++);
+      const sizes = new Array(k).fill(0); out.clusters.forEach(cid=>sizes[cid]++);
       return { cols, clusters: out.clusters, centroids: out.centroids, inertia: out.inertia, sizes, rowIndexMap };
     } catch { return null; }
   }, [fullData, clusterCols, k, names.length]);
 
-  // Charts — brighter lines/points + readable grid on dark theme
-  const axisColor = "rgba(255,255,255,0.7)";
-  const gridColor = "rgba(255,255,255,0.10)";
+  // Chart styling for dark UI — brighter
+  const axisColor = "rgba(255,255,255,0.85)";
+  const gridColor = "rgba(255,255,255,0.12)";
   const chartOptions = {
     responsive:true, maintainAspectRatio:false,
     scales:{ x:{ type:"linear", position:"bottom", ticks:{ color:axisColor }, grid:{ color:gridColor } },
             y:{ type:"linear", ticks:{ color:axisColor }, grid:{ color:gridColor } } },
-    plugins:{
-      legend:{ labels:{ color:axisColor } },
-      title:{ color:axisColor }
-    },
+    plugins:{ legend:{ labels:{ color:axisColor } }, title:{ color:axisColor } },
     elements:{ point:{ radius:3, hitRadius:6 }, line:{ borderWidth:2 } }
   };
+  const clusterPalette = [
+    "rgba(99,102,241,0.9)",   // indigo
+    "rgba(16,185,129,0.9)",   // emerald
+    "rgba(234,179,8,0.9)",    // amber
+    "rgba(244,63,94,0.9)",    // rose
+    "rgba(59,130,246,0.9)",   // blue
+    "rgba(217,70,239,0.9)",   // fuchsia
+    "rgba(34,197,94,0.9)",    // green
+    "rgba(250,204,21,0.9)",   // yellow
+    "rgba(168,85,247,0.9)",   // violet
+    "rgba(236,72,153,0.9)"    // pink
+  ];
 
+  // IO helpers
   function setCell(i, j, v) {
     setFullData(prev => { const next = prev.map(r => r.slice()); next[i][j] = v; return next; });
   }
@@ -169,8 +186,6 @@ export default function Home() {
   function delRow() { setFullData(prev => prev.length > 2 ? prev.slice(0, -1) : prev); }
   function addCol() { setFullData(prev => prev.map((row, i) => [...row, i === 0 ? `col_${row.length + 1}` : ""])); }
   function delCol() { setFullData(prev => prev[0].length > 1 ? prev.map(r => r.slice(0, -1)) : prev); }
-  function newGrid() { setFullData(makeGrid(8, 4)); }
-
   function importCSV(file) {
     Papa.parse(file, {
       complete: (res) => {
@@ -183,60 +198,39 @@ export default function Home() {
       }
     });
   }
-  function exportCSV() {
-    const csv = Papa.unparse(fullData);
-    download("dataset.csv", csv, "text/csv");
-  }
-  function exportReport() {
-    const lines = [];
-    lines.push("# Analysis Report", "", "## Schema");
-    lines.push(names.map((n, i) => `- ${i}: ${n}`).join("\n"));
-    lines.push("", "## Summary (numeric)");
-    summary.forEach(s => { if (s.count) lines.push(`- ${s.name}: n=${s.count}, mean=${s.mean.toFixed(4)}, med=${s.median.toFixed(4)}, sd=${s.stdev.toFixed(4)}, min=${s.min}, max=${s.max}`); });
-    if (regression) {
-      lines.push("", "## Linear regression");
-      lines.push(`- X=${names[xCol]}  Y=${names[yCol]}`);
-      lines.push(`- equation: y = ${regression.slope.toFixed(6)} * x + ${regression.intercept.toFixed(6)}`);
-      lines.push(`- r (Pearson) = ${regression.r.toFixed(6)}  R^2 = ${regression.r2.toFixed(6)}`);
-    }
-    if (clusters) {
-      lines.push("", "## K-means");
-      lines.push(`- features=${clusters.cols.map(c => names[c]).join(", ")}  k=${k}`);
-      lines.push(`- inertia (SSE) = ${clusters.inertia.toFixed(4)}`);
-      lines.push(`- sizes = ${clusters.sizes.join(", ")}`);
-      // centroids preview for first two features to keep it readable
-      const f1 = names[clusters.cols[0]], f2 = clusters.cols[1] != null ? names[clusters.cols[1]] : null;
-      if (f2) {
-        lines.push("- centroids (first two features):");
-        clusters.centroids.forEach((cen, idx)=> lines.push(`  - C${idx+1}: ${f1}=${cen[0].toFixed(4)}, ${f2}=${cen[1].toFixed(4)}`));
-      }
-    }
-    download("analysis_report.md", lines.join("\n"));
+  const exportCSV = () => download("dataset.csv", Papa.unparse(fullData), "text/csv");
+
+  const buildContextForLLM = () => {
+    const schema = names.map((n, i) => `${i}:${n}`).join(", ");
+    const numericBrief = summary.filter(s=>s.count).map(s=>`${s.name}{n:${s.count},mean:${s.mean.toFixed(3)},sd:${s.stdev.toFixed(3)}}`).join("; ");
+    const regBrief = regression ? `regression X=${names[xCol]} Y=${names[yCol]} slope=${regression.slope.toFixed(4)} intercept=${regression.intercept.toFixed(4)} r=${regression.r.toFixed(4)} r2=${regression.r2.toFixed(4)}` : "no regression";
+    const cluBrief = clusters ? `kmeans k=${k} features=${clusters.cols.map(c=>names[c]).join(",")} inertia=${clusters.inertia.toFixed(2)} sizes=${clusters.sizes.join("/")}; centroids=${JSON.stringify(clusters.centroids)}` : "no clustering";
+    const csvPreview = Papa.unparse(fullData.slice(0, Math.min(20, fullData.length)));
+    return `schema: ${schema}\nsummary: ${numericBrief}\n${regBrief}\n${cluBrief}\ncsv_preview:\n${csvPreview}`;
+  };
+
+  async function explainClusters() {
+    setClusterExplain("thinking…");
+    try {
+      const ctx = buildContextForLLM();
+      const prompt = `
+Explain the k-means result in plain language. 
+- Describe each cluster using the selected feature names and centroid values.
+- Compare cluster sizes and what that implies.
+- Mention inertia and how changing k might help.
+- No code. 
+`.trim();
+      const res = await fetch("/api/ask", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ prompt, context: ctx }) });
+      const json = await res.json();
+      setClusterExplain(json.text || json.error || "no response");
+    } catch (e) { setClusterExplain(String(e)); }
   }
 
   async function askAI() {
     setBusyAsk(true); setAiAnswer("");
     try {
-      const schema = names.map((n, i) => `${i}:${n}`).join(", ");
-      const numericBrief = summary.filter(s => s.count).map(s => `${s.name}{n:${s.count},mean:${s.mean.toFixed(3)},sd:${s.stdev.toFixed(3)}}`).join("; ");
-      const regBrief = regression ? `regression X=${names[xCol]} Y=${names[yCol]} slope=${regression.slope.toFixed(4)} intercept=${regression.intercept.toFixed(4)} r=${regression.r.toFixed(4)} r2=${regression.r2.toFixed(4)} eq:y=${regression.slope.toFixed(4)}*x+${regression.intercept.toFixed(4)}` : "no regression";
-      const cluBrief = clusters ? `kmeans k=${k} features=${clusters.cols.map(c=>names[c]).join(",")} inertia=${clusters.inertia.toFixed(2)} sizes=${clusters.sizes.join("/")}` : "no clustering";
-      const csvPreview = Papa.unparse(fullData.slice(0, Math.min(20, fullData.length)));
-      const prompt = `
-You are a data analyst. Given:
-schema: ${schema}
-summary: ${numericBrief}
-${regBrief}
-${cluBrief}
-csv_preview:
-${csvPreview}
-
-User question:
-${aiQuestion}
-
-Answer clearly with concrete, beginner-safe steps and short formulas when relevant.
-`.trim();
-      const res = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt }) });
+      const ctx = buildContextForLLM();
+      const res = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt: aiQuestion, context: ctx }) });
       const json = await res.json();
       setAiAnswer(json.text || json.error || "no response");
     } catch (e) { setAiAnswer(String(e)); }
@@ -247,22 +241,18 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white">
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
-        {/* AI-centered generate */}
+
+        {/* DATASET PREVIEW + GENERATION BAR */}
         <section className="rounded-2xl bg-slate-900/70 ring-1 ring-white/10 p-5">
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight mb-2">DATAROOM — AI dataset lab</h1>
-          <p className="text-sm opacity-80 mb-4">Describe the data you want. We’ll generate thousands of rows, but only show the first 10 here.</p>
           <div className="grid md:grid-cols-3 gap-4">
             <div className="md:col-span-2 space-y-2">
-              <textarea
-                className="w-full h-28 rounded-xl bg-slate-800/80 p-3 outline-none"
-                placeholder="Describe the dataset you want…"
-                value={genPrompt}
-                onChange={(e)=>setGenPrompt(e.target.value)}
-              />
+              <textarea className="w-full h-24 rounded-xl bg-slate-800/80 p-3 outline-none"
+                        placeholder="Describe the dataset you want…"
+                        value={genPrompt} onChange={(e)=>setGenPrompt(e.target.value)} />
               <div className="flex flex-wrap items-center gap-3">
                 <label className="text-sm opacity-80">target rows</label>
-                <input type="number" min="100" max="5000" step="100"
-                       className="w-28 px-2 py-1 rounded bg-slate-800/80"
+                <input type="number" min="100" max="5000" step="100" className="w-28 px-2 py-1 rounded bg-slate-800/80"
                        value={genRows} onChange={(e)=>setGenRows(Number(e.target.value)||1000)} />
                 <button onClick={async ()=>{
                   setBusyGen(true); setGenError("");
@@ -277,33 +267,27 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                     grid[0] = grid[0].map(h => String(h || "").trim() || "col");
                     setFullData(grid);
                   } catch (e) { setGenError(String(e)); } finally { setBusyGen(false); }
-                }} disabled={busyGen}
-                        className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50">
+                }} disabled={busyGen} className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50">
                   {busyGen ? "generating…" : "generate dataset"}
                 </button>
                 <button onClick={exportCSV} className="px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600">export csv</button>
+                <label className="px-3 py-2 rounded-xl bg-slate-800/80 cursor-pointer">
+                  import csv
+                  <input type="file" accept=".csv" className="hidden" onChange={(e) => e.target.files?.[0] && importCSV(e.target.files[0])} />
+                </label>
               </div>
               {genError && <div className="text-xs text-red-300">{genError}</div>}
             </div>
             <div className="space-y-2">
               <div className="text-sm font-medium opacity-90">example prompts</div>
-              <ul className="text-xs space-y-1">
-                {EXAMPLES.map((ex, i)=>(
-                  <li key={i}>
-                    <button
-                      className="text-left w-full px-2 py-1 rounded bg-slate-800/70 hover:bg-slate-800/90"
-                      onClick={()=>setGenPrompt(ex)}
-                    >
-                      {ex}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <ul className="text-xs space-y-1">{EXAMPLES.map((ex,i)=>(
+                <li key={i}><button className="text-left w-full px-2 py-1 rounded bg-slate-800/70 hover:bg-slate-800/90" onClick={()=>setGenPrompt(ex)}>{ex}</button></li>
+              ))}</ul>
             </div>
           </div>
         </section>
 
-        {/* Dataset preview (first 10 rows) */}
+        {/* PREVIEW (first 10 rows) */}
         <section className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold">dataset preview</h2>
@@ -312,43 +296,49 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
           <div className="overflow-auto border border-white/10 rounded-xl">
             <table className="min-w-full text-sm">
               <thead className="bg-slate-800/70 sticky top-0">
-                <tr>
-                  {viewData[0].map((h, j) => (
-                    <th key={j} className="px-3 py-2 border-b border-white/10">
-                      <input className="w-40 bg-transparent outline-none" value={h} onChange={(e) => setCell(0, j, e.target.value)} />
-                    </th>
-                  ))}
+                <tr>{viewData[0].map((h, j) => (
+                  <th key={j} className="px-3 py-2 border-b border-white/10">
+                    <input className="w-40 bg-transparent outline-none" value={h} onChange={(e) => setCell(0, j, e.target.value)} />
+                  </th>))}
                 </tr>
               </thead>
-              <tbody>
-                {viewData.slice(1).map((row, i) => (
-                  <tr key={i} className="odd:bg-slate-900/40">
-                    {row.map((cell, j) => (
-                      <td key={j} className="px-3 py-1 border-b border-white/5">
-                        <input className="w-40 bg-transparent outline-none" value={cell} onChange={(e) => setCell(i + 1, j, e.target.value)} placeholder="..." />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
+              <tbody>{viewData.slice(1).map((row, i) => (
+                <tr key={i} className="odd:bg-slate-900/40">
+                  {row.map((cell, j) => (
+                    <td key={j} className="px-3 py-1 border-b border-white/5">
+                      <input className="w-40 bg-transparent outline-none" value={cell} onChange={(e) => setCell(i + 1, j, e.target.value)} placeholder="..." />
+                    </td>
+                  ))}
+                </tr>
+              ))}</tbody>
             </table>
           </div>
         </section>
 
-        {/* Quick summary cards */}
-        <section className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {summary.filter(s=>s.count).slice(0,4).map((s,idx)=>(
-            <div key={idx} className="rounded-xl bg-slate-900/70 ring-1 ring-white/10 p-4">
-              <div className="text-xs opacity-70">{s.name}</div>
-              <div className="mt-1 text-lg font-semibold">μ {s.mean.toFixed(2)} · σ {s.stdev.toFixed(2)}</div>
-              <div className="text-xs opacity-70">n={s.count} · min {s.min} · max {s.max}</div>
+        {/* QUICK CORRELATION */}
+        <section className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-5">
+          <div className="flex items-center gap-3 mb-2">
+            <h2 className="font-semibold">quick correlation to a target</h2>
+            <select value={corrTarget} onChange={(e)=>setCorrTarget(Number(e.target.value))} className="px-2 py-1 rounded bg-slate-800/80">
+              {names.map((n,i)=>(<option key={i} value={i}>{n}</option>))}
+            </select>
+          </div>
+          {topCorr.length ? (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-2">
+              {topCorr.map((c,idx)=>(
+                <div key={idx} className="rounded-xl bg-slate-800/60 p-3">
+                  <div className="text-xs opacity-70">{c.name}</div>
+                  <div className="text-sm font-semibold">r = {c.r.toFixed(3)}</div>
+                  <div className="text-[11px] opacity-60">{Math.abs(c.r) < 0.2 ? "weak" : Math.abs(c.r) < 0.5 ? "moderate" : "strong"} correlation</div>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : <div className="text-sm opacity-70">Pick a numeric target column. We’ll show the top 5 absolute correlations.</div>}
         </section>
 
-        {/* Analytics */}
+        {/* ANALYTICS */}
         <section className="grid lg:grid-cols-2 gap-6">
-          {/* Regression */}
+          {/* REGRESSION */}
           <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-5">
             <h2 className="font-semibold mb-3">linear regression</h2>
             <div className="flex gap-2 mb-3">
@@ -359,10 +349,8 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                 {names.map((n,i)=>(<option key={i} value={i}>Y: {n}</option>))}
               </select>
             </div>
-
             {regression ? (
               <>
-                {/* Friendly stat cards */}
                 <div className="grid sm:grid-cols-2 gap-3 mb-3">
                   <div className="rounded-xl bg-slate-800/60 p-3">
                     <div className="text-xs opacity-70">equation</div>
@@ -373,31 +361,13 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                     <div className="text-sm font-semibold">r = {regression.r.toFixed(4)} · R² = {regression.r2.toFixed(4)}</div>
                   </div>
                 </div>
-
                 <div className="bg-slate-800/40 rounded-xl p-2 h-64">
                   <ClientOnly>
                     <Scatter
                       data={{
                         datasets: [
-                          {
-                            label:"data",
-                            data: regression.points.map(([x,y])=>({x,y})),
-                            showLine:false,
-                            borderColor:"rgba(99,102,241,0.9)", // indigo-500
-                            backgroundColor:"rgba(99,102,241,0.9)"
-                          },
-                          {
-                            label:"fit",
-                            data:(()=>{
-                              const xs = regression.points.map(p=>p[0]);
-                              const minX = Math.min(...xs), maxX = Math.max(...xs);
-                              return [{x:minX, y:regression.slope*minX+regression.intercept},
-                                      {x:maxX, y:regression.slope*maxX+regression.intercept}];
-                            })(),
-                            showLine:true,
-                            borderColor:"rgba(236,72,153,0.9)", // pink-500
-                            backgroundColor:"rgba(236,72,153,0.9)"
-                          }
+                          { label:"data", data: regression.points.map(([x,y])=>({x,y})), showLine:false, borderColor:"rgba(99,102,241,0.95)", backgroundColor:"rgba(99,102,241,0.95)" },
+                          { label:"fit", data:(()=>{ const xs=regression.points.map(p=>p[0]); const minX=Math.min(...xs), maxX=Math.max(...xs); return [{x:minX,y:regression.slope*minX+regression.intercept},{x:maxX,y:regression.slope*maxX+regression.intercept}]; })(), showLine:true, borderColor:"rgba(236,72,153,0.95)", backgroundColor:"rgba(236,72,153,0.95)" }
                         ]
                       }}
                       options={chartOptions}
@@ -405,16 +375,13 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                   </ClientOnly>
                 </div>
               </>
-            ) : (
-              <div className="text-sm opacity-80">
-                Pick numeric columns for X and Y. You need at least 2 rows with numbers in both columns.
-              </div>
-            )}
+            ) : <div className="text-sm opacity-80">Pick numeric columns for X and Y (need ≥ 2 numeric rows).</div>}
           </div>
 
-          {/* K-means */}
+          {/* K-MEANS */}
           <div className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-5">
             <h2 className="font-semibold mb-3">k-means clustering</h2>
+            <p className="text-xs opacity-70 mb-2">Choose numeric features. k-means groups rows by proximity; centroids are the “typical row” per group. Lower inertia means tighter clusters.</p>
             <div className="flex flex-wrap gap-2 mb-3">
               <div className="flex items-center gap-1">
                 <span className="text-sm opacity-80">k</span>
@@ -434,39 +401,37 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
 
             {clusters && clusters.cols.length>=2 ? (
               <>
-                {/* Friendly stat cards */}
                 <div className="grid sm:grid-cols-3 gap-3 mb-3">
-                  <div className="rounded-xl bg-slate-800/60 p-3">
-                    <div className="text-xs opacity-70">features</div>
-                    <div className="text-sm font-semibold">{clusters.cols.map(c=>names[c]).join(", ")}</div>
-                  </div>
-                  <div className="rounded-xl bg-slate-800/60 p-3">
-                    <div className="text-xs opacity-70">sizes</div>
-                    <div className="text-sm font-semibold">{clusters.sizes.join(" · ")}</div>
-                  </div>
-                  <div className="rounded-xl bg-slate-800/60 p-3">
-                    <div className="text-xs opacity-70">inertia (SSE)</div>
-                    <div className="text-sm font-semibold">{clusters.inertia.toFixed(2)}</div>
-                  </div>
+                  <div className="rounded-xl bg-slate-800/60 p-3"><div className="text-xs opacity-70">features</div><div className="text-sm font-semibold">{clusters.cols.map(c=>names[c]).join(", ")}</div></div>
+                  <div className="rounded-xl bg-slate-800/60 p-3"><div className="text-xs opacity-70">sizes</div><div className="text-sm font-semibold">{clusters.sizes.join(" · ")}</div></div>
+                  <div className="rounded-xl bg-slate-800/60 p-3"><div className="text-xs opacity-70">inertia (SSE)</div><div className="text-sm font-semibold">{clusters.inertia.toFixed(2)}</div></div>
                 </div>
 
-                {/* Centroids (first two features) */}
-                {clusters.cols.length >= 2 && (
-                  <div className="text-xs opacity-90 mb-3">
-                    <div className="mb-1">centroids (for first two selected features):</div>
-                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                      {clusters.centroids.map((cen, idx)=>(
-                        <div key={idx} className="rounded-lg bg-slate-800/60 p-2">
-                          <div className="opacity-70">cluster {idx+1}</div>
-                          <div>{names[clusters.cols[0]]}: <span className="font-semibold">{cen[0].toFixed(3)}</span></div>
-                          <div>{names[clusters.cols[1]]}: <span className="font-semibold">{cen[1].toFixed(3)}</span></div>
-                        </div>
+                {/* Full centroid table for selected features (limited to first 6 features for readability) */}
+                <div className="overflow-auto border border-white/10 rounded-xl mb-3">
+                  <table className="min-w-full text-xs">
+                    <thead className="bg-slate-800/70 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 border-b border-white/10 text-left">cluster</th>
+                        {clusters.cols.slice(0,6).map((c,idx)=>(
+                          <th key={idx} className="px-3 py-2 border-b border-white/10 text-left">{names[c]}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {clusters.centroids.map((cen, i)=>(
+                        <tr key={i} className="odd:bg-slate-900/40">
+                          <td className="px-3 py-2 border-b border-white/5">#{i+1} (n={clusters.sizes[i]})</td>
+                          {clusters.cols.slice(0,6).map((c,idx)=>(
+                            <td key={idx} className="px-3 py-2 border-b border-white/5">{Number(cen[idx]).toFixed(3)}</td>
+                          ))}
+                        </tr>
                       ))}
-                    </div>
-                  </div>
-                )}
+                    </tbody>
+                  </table>
+                </div>
 
-                <div className="bg-slate-800/40 rounded-xl p-2 h-64">
+                <div className="bg-slate-800/40 rounded-xl p-2 h-64 mb-3">
                   <ClientOnly>
                     <Scatter
                       data={(function(){
@@ -474,12 +439,12 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                         const pts=[]; for(let i=1;i<fullData.length;i++){ const x=Number(fullData[i][c1]); const y=Number(fullData[i][c2]); if(Number.isFinite(x)&&Number.isFinite(y)) pts.push({x,y}); }
                         const grouped={}; clusters.clusters.forEach((cid, i)=>{ (grouped[cid] ||= []).push(pts[i]); });
                         return {
-                          datasets: Object.keys(grouped).map(cid=>({
+                          datasets: Object.keys(grouped).map((cid, idx)=>({
                             label:`cluster ${Number(cid)+1}`,
                             data: grouped[cid],
                             showLine:false,
-                            borderColor:"rgba(34,197,94,0.9)", // green-500-ish (all groups share color; simplicity)
-                            backgroundColor:"rgba(34,197,94,0.9)"
+                            borderColor: clusterPalette[idx % clusterPalette.length],
+                            backgroundColor: clusterPalette[idx % clusterPalette.length]
                           }))
                         };
                       })()}
@@ -487,27 +452,25 @@ Answer clearly with concrete, beginner-safe steps and short formulas when releva
                     />
                   </ClientOnly>
                 </div>
+
+                <button onClick={explainClusters} className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500">explain clusters</button>
+                {clusterExplain && <pre className="mt-3 whitespace-pre-wrap text-xs bg-slate-800/60 p-2 rounded-xl">{clusterExplain}</pre>}
               </>
-            ) : (
-              <div className="text-sm opacity-80">
-                Select at least two numeric features and ensure rows contain numbers. Increase k if clusters look mixed.
-              </div>
-            )}
+            ) : <div className="text-sm opacity-80">Select at least two numeric features. Tip: standardize wildly different scales before clustering (not implemented here).</div>}
           </div>
         </section>
 
-        {/* Ask the analysis */}
+        {/* ASK */}
         <section className="rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-5">
           <h2 className="font-semibold mb-3">ask the analysis</h2>
           <textarea className="w-full h-24 rounded-xl bg-slate-800/80 p-2 outline-none"
-                    placeholder="e.g., which features correlate with revenue? segment drivers of churn? is B statistically better than A?"
+                    placeholder="e.g., which features drive monthly_fee? how do clusters differ by seats vs monthly_fee?"
                     value={aiQuestion} onChange={(e)=>setAiQuestion(e.target.value)} />
           <button onClick={askAI} disabled={busyAsk || !aiQuestion.trim()} className="mt-2 px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50">
             {busyAsk ? "thinking…" : "ask"}
           </button>
           {aiAnswer && (<pre className="mt-3 whitespace-pre-wrap text-xs bg-slate-800/60 p-2 rounded-xl">{aiAnswer.trim()}</pre>)}
         </section>
-
       </div>
     </main>
   );
