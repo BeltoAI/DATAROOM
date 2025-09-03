@@ -1,0 +1,7 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "next build",
+  "env": {
+    "LLM_ENDPOINT": "http://minibelto.duckdns.org:8007/v1/completions"
+  }
+}
