@@ -3,7 +3,6 @@
 @tailwind utilities;
 
 :root { color-scheme: dark; }
-
 html, body { height: 100%; }
 
 * {
@@ -11,13 +10,7 @@ html, body { height: 100%; }
   scrollbar-color: #94a3b8 transparent;
 }
 
-/* Basic utility polish */
-.container {
-  @apply mx-auto max-w-7xl px-4;
-}
-.card {
-  @apply rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4;
-}
-.btn {
-  @apply px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 disabled:opacity-50;
-}
+/* optional utility shortcuts */
+.container { @apply mx-auto max-w-7xl px-4; }
+.card { @apply rounded-2xl bg-slate-900/60 ring-1 ring-white/10 p-4; }
+.btn { @apply px-3 py-2 rounded-xl bg-slate-700 hover:bg-slate-600 disabled:opacity-50; }
